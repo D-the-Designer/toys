@@ -228,11 +228,12 @@
 
   .keys{
     display:flex;
+    flex-wrap:wrap;
     gap:8px;
     margin-bottom:6px;
   }
   .keys button{
-    flex:1;
+    flex:1 1 calc(50% - 8px);
     font-family:'VT323',monospace;
     font-size:1.1rem;
     letter-spacing:1px;
@@ -343,6 +344,7 @@
         <button id="copyBtn">COPY</button>
         <button id="playBtn">▶ PLAY</button>
         <button id="flashBtn">⚡ FLASH</button>
+        <button id="exportBtn">⬇ WAV</button>
       </div>
     </div>
 
@@ -381,6 +383,7 @@ const outLabel = document.getElementById('outLabel');
 const copyBtn = document.getElementById('copyBtn');
 const playBtn = document.getElementById('playBtn');
 const flashBtn = document.getElementById('flashBtn');
+const exportBtn = document.getElementById('exportBtn');
 
 function looksLikeMorse(str) {
   const trimmed = str.trim();
@@ -506,6 +509,110 @@ flashBtn.addEventListener('click', () => {
   const morseStr = currentMode === 'toMorse' ? output.textContent : input.value;
   if (!morseStr.trim()) return;
   flashMorse(morseStr);
+});
+
+function sanitizeFilename(str) {
+  const cleaned = str.trim().slice(0, 28).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || 'morse-code';
+}
+
+function bufferToWav(buffer) {
+  const sampleRate = buffer.sampleRate;
+  const samples = buffer.getChannelData(0);
+  const bitDepth = 16;
+  const dataLength = samples.length * (bitDepth / 8);
+  const arrBuf = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(arrBuf);
+
+  function writeStr(offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  }
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // PCM
+  view.setUint16(22, 1, true);          // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, bitDepth, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+  return new Blob([arrBuf], { type: 'audio/wav' });
+}
+
+async function exportWav() {
+  const morseStr = (currentMode === 'toMorse' ? output.textContent : input.value).trim();
+  if (!morseStr) return;
+
+  const unit = 0.1; // seconds — matches on-screen playback timing
+  let t = 0;
+  const events = [];
+  for (const ch of morseStr) {
+    if (ch === '.') { events.push({ start: t, dur: unit }); t += unit * 2; }
+    else if (ch === '-') { events.push({ start: t, dur: unit * 3 }); t += unit * 4; }
+    else if (ch === ' ') { t += unit * 2; }
+    else if (ch === '/') { t += unit * 4; }
+  }
+  if (!events.length) return;
+  const totalDuration = t + 0.25;
+
+  exportBtn.textContent = 'RENDERING…';
+  exportBtn.disabled = true;
+
+  try {
+    const sampleRate = 44100;
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(sampleRate * totalDuration), sampleRate);
+
+    events.forEach(ev => {
+      const osc = offlineCtx.createOscillator();
+      const gain = offlineCtx.createGain();
+      osc.frequency.value = 600;
+      osc.type = 'sine';
+      osc.connect(gain);
+      gain.connect(offlineCtx.destination);
+      const attack = Math.min(0.005, ev.dur / 4);
+      gain.gain.setValueAtTime(0, ev.start);
+      gain.gain.linearRampToValueAtTime(0.3, ev.start + attack);
+      gain.gain.setValueAtTime(0.3, ev.start + ev.dur - attack);
+      gain.gain.linearRampToValueAtTime(0, ev.start + ev.dur);
+      osc.start(ev.start);
+      osc.stop(ev.start + ev.dur);
+    });
+
+    const rendered = await offlineCtx.startRendering();
+    const blob = bufferToWav(rendered);
+    const url = URL.createObjectURL(blob);
+    const label = currentMode === 'toMorse' ? input.value : output.textContent;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = sanitizeFilename(label) + '.wav';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('WAV export failed', err);
+  }
+
+  exportBtn.textContent = '⬇ WAV';
+  exportBtn.disabled = false;
+}
+
+exportBtn.addEventListener('click', () => {
+  const morseStr = currentMode === 'toMorse' ? output.textContent : input.value;
+  if (!morseStr.trim()) return;
+  exportWav();
 });
 
 const chart = document.getElementById('chart');
